@@ -3,6 +3,10 @@ set -Eeuo pipefail
 
 # docker-update
 # Update the Docker Compose project in the current directory.
+#
+# Usage:
+#   docker-update
+#   docker-update --logs
 
 log() {
     printf '[docker-update] %s\n' "$*"
@@ -13,17 +17,25 @@ die() {
     exit 1
 }
 
-# Resolve the directory from which the command was invoked.
+FOLLOW_LOGS=false
+
+while (($#)); do
+    case "$1" in
+        --logs|-l)
+            FOLLOW_LOGS=true
+            ;;
+        --help|-h)
+            printf 'Usage: docker-update [--logs|-l]\n'
+            exit 0
+            ;;
+        *)
+            die "Unknown argument: $1"
+            ;;
+    esac
+    shift
+done
+
 PROJECT_DIR="$(pwd -P)"
-
-# A project-specific update script takes precedence.
-if [[ -f "$PROJECT_DIR/update.sh" ]]; then
-    [[ -x "$PROJECT_DIR/update.sh" ]] \
-        || die "update.sh exists but is not executable: $PROJECT_DIR/update.sh"
-
-    log "Running project-specific update.sh"
-    exec "$PROJECT_DIR/update.sh"
-fi
 
 # Find a Compose file.
 COMPOSE_FILE=""
@@ -40,28 +52,63 @@ do
     fi
 done
 
-[[ -n "$COMPOSE_FILE" ]] \
-    || die "No Compose YAML file found in $PROJECT_DIR"
+# Prefer a project-specific update script when present.
+if [[ -f "$PROJECT_DIR/update.sh" ]]; then
+    [[ -x "$PROJECT_DIR/update.sh" ]] \
+        || die "update.sh exists but is not executable."
 
-command -v docker >/dev/null 2>&1 \
-    || die "Docker CLI not found."
+    log "Running project-specific update.sh"
+    "$PROJECT_DIR/update.sh" \
+        || die "Project-specific update.sh failed."
+else
+    [[ -n "$COMPOSE_FILE" ]] \
+        || die "No Compose YAML file found in $PROJECT_DIR"
 
-docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose v2 plugin is not available."
+    command -v docker >/dev/null 2>&1 \
+        || die "Docker CLI not found."
 
-log "Project directory: $PROJECT_DIR"
-log "Compose file: $(basename "$COMPOSE_FILE")"
+    docker compose version >/dev/null 2>&1 \
+        || die "Docker Compose v2 plugin is not available."
 
-# Validate configuration before changing anything.
-log "Validating Compose configuration"
-docker compose -f "$COMPOSE_FILE" config -q
+    log "Project directory: $PROJECT_DIR"
+    log "Compose file: $(basename "$COMPOSE_FILE")"
 
-# Pull images, then recreate services as required.
-log "Pulling images"
-docker compose -f "$COMPOSE_FILE" pull
+    log "Validating Compose configuration"
+    docker compose -f "$COMPOSE_FILE" config -q
 
-log "Applying updates"
-docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+    log "Pulling images"
+    docker compose -f "$COMPOSE_FILE" pull
 
-log "Update complete"
-docker compose -f "$COMPOSE_FILE" ps
+    log "Applying updates"
+    docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+
+    log "Update complete"
+    docker compose -f "$COMPOSE_FILE" ps
+fi
+
+# Follow logs only after the update has completed successfully.
+if [[ "$FOLLOW_LOGS" == true ]]; then
+    log "Following container logs (Ctrl+C to exit)"
+
+    if [[ -n "$COMPOSE_FILE" ]]; then
+        exec docker compose -f "$COMPOSE_FILE" logs -f
+    else
+        # For a custom update script, resolve the Compose file now.
+        for file in \
+            compose.yaml \
+            compose.yml \
+            docker-compose.yaml \
+            docker-compose.yml
+        do
+            if [[ -f "$PROJECT_DIR/$file" ]]; then
+                COMPOSE_FILE="$PROJECT_DIR/$file"
+                break
+            fi
+        done
+
+        [[ -n "$COMPOSE_FILE" ]] \
+            || die "Cannot follow logs: no Compose YAML file found."
+
+        exec docker compose -f "$COMPOSE_FILE" logs -f
+    fi
+fi
